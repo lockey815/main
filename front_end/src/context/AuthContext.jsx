@@ -1,3 +1,4 @@
+
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { authApi, tokenStore } from "../services/api.js";
 
@@ -7,6 +8,13 @@ export const useAuth = () => useContext(Ctx);
 export function AuthProvider({ children }) {
   const [token, setToken] = useState(tokenStore.get());
   const [email, setEmail] = useState(localStorage.getItem("leuknet_email") || "");
+
+  const saveSession = useCallback((data) => {
+    tokenStore.set(data.access_token);
+    localStorage.setItem("leuknet_email", data.email);
+    setToken(data.access_token);
+    setEmail(data.email);
+  }, []);
 
   const logout = useCallback(() => {
     tokenStore.clear();
@@ -22,11 +30,24 @@ export function AuthProvider({ children }) {
 
   const login = useCallback(async (mail, password) => {
     const data = await authApi.login(mail, password);
-    tokenStore.set(data.access_token);
-    localStorage.setItem("leuknet_email", data.email);
-    setToken(data.access_token);
-    setEmail(data.email);
-  }, []);
+    saveSession(data);
+  }, [saveSession]);
 
-  return <Ctx.Provider value={{ token, email, isAuthed: !!token, login, logout }}>{children}</Ctx.Provider>;
+  const register = useCallback(async (mail, password) => {
+    const data = await authApi.register(mail, password);
+    saveSession(data);
+  }, [saveSession]);
+
+  return (
+    <Ctx.Provider value={{
+      token,
+      email,
+      isAuthed: !!token,
+      login,
+      register,
+      logout
+    }}>
+      {children}
+    </Ctx.Provider>
+  );
 }

@@ -11,6 +11,7 @@ import ReportsManager from "./pages/ReportsManager.jsx";
 import Settings from "./pages/Settings.jsx";
 import Verify from "./pages/Verify.jsx";
 import Welcome from "./pages/Welcome.jsx";
+import Register from "./pages/Register.jsx";
 
 function RequireAuth() {
   const { isAuthed } = useAuth();
@@ -21,12 +22,12 @@ function RequireAuth() {
 export default function App() {
   return (
     <Routes>
-      {/* Public pages */}
-      <Route path="/" element={<Welcome />} />
-      <Route path="/about" element={<About />} />
-      <Route path="/login" element={<Login />} />
-      {/* Opened by scanning the QR code on a printed report */}
-      <Route path="/verify/:token" element={<Verify />} />
+     {/* Public pages */}
+<Route path="/" element={<Welcome />} />
+<Route path="/about" element={<About />} />
+<Route path="/login" element={<Login />} />
+<Route path="/register" element={<Register />} />
+<Route path="/verify/:token" element={<Verify />} />
 
       {/* Signed-in area */}
       <Route element={<RequireAuth />}>

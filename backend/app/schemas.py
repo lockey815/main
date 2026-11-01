@@ -36,8 +36,8 @@ class PatientOut(PatientBase, ORM):
 
 # ---------- Auth ----------
 class LoginIn(BaseModel):
-    email: str = Field(min_length=3, max_length=200)
-    password: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=200)
 
 
 class TokenOut(BaseModel):

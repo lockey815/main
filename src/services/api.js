@@ -46,7 +46,11 @@ export function errorMessage(err) {
 export const healthApi = { get: () => http.get("/health").then((r) => r.data) };
 
 export const authApi = {
-  login: (email, password) => http.post("/auth/login", { email, password }).then((r) => r.data),
+  login: (email, password) =>
+    http.post("/auth/login", { email, password }).then((r) => r.data),
+
+  register: (email, password) =>
+    http.post("/auth/register", { email, password }).then((r) => r.data),
 };
 
 export const patientsApi = {

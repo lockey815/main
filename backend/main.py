@@ -2,8 +2,14 @@
 """
 LeukNet API entry point.
 
-Run locally: uvicorn main:app --reload --port 8000
-Docs: http://localhost:8000/docs
+Run locally:
+    uvicorn main:app --reload --port 8000
+
+Documentation:
+    http://localhost:8000/docs
+
+Health:
+    http://localhost:8000/api/health
 """
 
 import logging
@@ -19,38 +25,68 @@ from app.ml import ModelService
 from app.routers import auth, patients, predict, reports, sessions, verify
 from app.routers import settings as settings_router
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+
+# --------------------------------------------------
+# Logging and configuration
+# --------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+
+logger = logging.getLogger("leuknet")
 
 cfg = get_settings()
 
 
+# --------------------------------------------------
+# Application lifespan
+# --------------------------------------------------
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize database
-    Base.metadata.create_all(bind=engine)
 
-    # Warn about insecure configuration
-    if cfg.secret_key == "change-me-in-production":
-        logger.warning(
-            "SECRET_KEY is the default value. "
-            "Configure a secure SECRET_KEY in Render."
-        )
+    logger.info("Starting LeukNet API...")
+
+    # Initialize model state immediately
+    app.state.ml = None
+
+    # Initialize database
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables initialized.")
+
+    except Exception:
+        logger.exception("Database initialization failed.")
 
     # Initialize administrator account
     if cfg.admin_email and cfg.admin_password:
-        with SessionLocal() as db:
-            ensure_user(db, cfg.admin_email, cfg.admin_password)
+        try:
+            with SessionLocal() as db:
+                ensure_user(db, cfg.admin_email, cfg.admin_password)
+
+            logger.info("Administrator account initialized.")
+
+        except Exception:
+            logger.exception("Administrator initialization failed.")
+
+    # Check production secret
+    if cfg.secret_key == "change-me-in-production":
+        logger.warning(
+            "Default SECRET_KEY detected. Configure a secure SECRET_KEY in Render."
+        )
 
     # Initialize machine learning service
-    app.state.ml = ModelService(cfg)
-
     try:
         logger.info("Initializing LeukNet model...")
+
+        app.state.ml = ModelService(cfg)
         app.state.ml.load()
 
         if app.state.ml.ready:
             logger.info("LeukNet model loaded successfully.")
+
         else:
             logger.error(
                 "LeukNet model failed to load: %s",
@@ -59,45 +95,73 @@ async def lifespan(app: FastAPI):
 
     except Exception as exc:
         logger.exception("Model initialization failed.")
-        app.state.ml.error = str(exc)
+
+        if app.state.ml is not None:
+            app.state.ml.error = str(exc)
 
     # Update report model information
-    reports.set_model_info(app.state.ml.info)
+    try:
+        if app.state.ml is not None:
+            reports.set_model_info(app.state.ml.info)
+
+    except Exception:
+        logger.exception("Could not update report model information.")
+
+    logger.info("LeukNet API startup complete.")
 
     yield
 
     logger.info("LeukNet API shutting down.")
 
 
+# --------------------------------------------------
+# FastAPI application
+# --------------------------------------------------
+
 app = FastAPI(
     title="LeukNet API",
-    version="2.0.0",
+    description="LeukNet blood-cell classification API",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
+
+# --------------------------------------------------
 # CORS configuration
+# --------------------------------------------------
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://main-6x0.pages.dev",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Public routes
+
+# --------------------------------------------------
+# Public routers
+# --------------------------------------------------
+
 app.include_router(auth.router, prefix="/api")
 app.include_router(verify.router, prefix="/api")
 
-# Protected routes
-protected_routers = (
+
+# --------------------------------------------------
+# Protected routers
+# --------------------------------------------------
+
+protected_routers = [
     predict.router,
     sessions.router,
     patients.router,
     reports.router,
     settings_router.router,
-)
+]
 
 for router in protected_routers:
     app.include_router(
@@ -107,30 +171,49 @@ for router in protected_routers:
     )
 
 
+# --------------------------------------------------
+# Health checks
+# --------------------------------------------------
+
 @app.get("/api/health", tags=["meta"])
+@app.get("/health", tags=["meta"])
+@app.get("/healthz", tags=["meta"])
 def health():
+
     ml = getattr(app.state, "ml", None)
 
     if ml is None:
         return {
+            "service": "LeukNet API",
             "status": "degraded",
             "model_loaded": False,
             "error": "Model service has not initialized.",
             "model": {},
         }
 
+    model_ready = bool(ml.ready)
+
     return {
-        "status": "ok" if ml.ready else "degraded",
-        "model_loaded": ml.ready,
+        "service": "LeukNet API",
+        "status": "ok" if model_ready else "degraded",
+        "model_loaded": model_ready,
         "error": ml.error,
         "model": ml.info,
     }
 
 
-@app.get("/", include_in_schema=False)
+# --------------------------------------------------
+# Root endpoint
+# --------------------------------------------------
+
+@app.get("/", tags=["meta"])
 def root():
+
     return {
         "service": "LeukNet API",
+        "version": "2.1.0",
+        "status": "running",
         "docs": "/docs",
         "health": "/api/health",
+        "health_alternative": "/health",
     }

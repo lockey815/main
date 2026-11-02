@@ -83,36 +83,27 @@ class ModelService:
 
     def load(self) -> None:
         try:
-            import keras
-            from huggingface_hub import hf_hub_download
+           import json
+import keras
 
-            token = os.getenv("HF_TOKEN") or None
-
-            log.info(
-                "Downloading LeukNet model from Hugging Face: %s",
-                MODEL_REPO,
-            )
-
-            model_path = hf_hub_download(
-                repo_id=MODEL_REPO,
-                filename=MODEL_FILENAME,
-                repo_type="model",
-                token=token,
-            )
-
-            log.info("Model downloaded to: %s", model_path)
-
-            # Load the complete Keras model
-            model = keras.applications.ResNet50(
-    include_top=True,
-    weights=None,
-    input_shape=(224, 224, 3),
-    classes=2
+config_path = hf_hub_download(
+    repo_id=MODEL_REPO,
+    filename="config.json"
 )
 
-model.load_weights(model_path)
-            )
+weights_path = hf_hub_download(
+    repo_id=MODEL_REPO,
+    filename="model.weights.h5"
+)
 
+with open(config_path, "r") as f:
+    model_config = json.load(f)
+
+model = keras.models.model_from_json(
+    json.dumps(model_config)
+)
+
+model.load_weights(weights_path)
             # Validate model input dimensions
             ishape = model.input_shape
 

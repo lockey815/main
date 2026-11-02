@@ -1,11 +1,10 @@
 
-"""LeukNet model loading and tile-based inference."""
+"""LeukNet TensorFlow Lite model loading and tile-based inference."""
 
 from __future__ import annotations
 
 import os
 
-os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import base64
@@ -13,13 +12,13 @@ import io
 import json
 import logging
 import threading
-import zipfile
 from pathlib import Path
 from dataclasses import dataclass, field
 
-import keras
 import numpy as np
+import tensorflow as tf
 import pypdfium2 as pdfium
+
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw, ImageOps
 
@@ -30,19 +29,22 @@ log = logging.getLogger("leuknet.ml")
 MODEL_REPO = os.getenv(
     "HF_MODEL_REPO", "Lockey815/LeukNet-ResNet50"
 )
+
 MODEL_FILENAME = os.getenv(
-    "HF_MODEL_FILENAME", "resnet50_final.keras"
+    "HF_MODEL_FILENAME", "leuknet_float16.tflite"
 )
+
 MODEL_REVISION = os.getenv("HF_MODEL_REVISION", "main")
 HF_TOKEN = os.getenv("HF_TOKEN") or None
 
-# Download to a local directory instead of relying on the
-# Hugging Face cache snapshot path.
 MODEL_DOWNLOAD_DIR = Path("/tmp/leuknet-model")
+
+TFLITE_NUM_THREADS = int(os.getenv("TFLITE_NUM_THREADS", "1"))
 
 _RESNET_BGR_MEAN = np.array(
     [103.939, 116.779, 123.68], dtype=np.float32
 )
+
 _BACKGROUND_STD = 10.0
 _MIN_SIDE = 32
 _MAX_STAIN_TILE = 0.01
@@ -69,21 +71,32 @@ class ImageAnalysis:
 @dataclass
 class ModelService:
     settings: Settings
+
     model: object = None
+
     input_h: int = 128
     input_w: int = 128
+
+    input_detail: dict | None = None
+    output_detail: dict | None = None
+
     info: dict = field(default_factory=dict)
     error: str | None = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock
+    )
 
     # --------------------------------------------------
     # Model loading
     # --------------------------------------------------
 
     def load(self) -> None:
+
         try:
+
             log.info(
-                "Downloading model: %s/%s",
+                "Downloading TFLite model: %s/%s",
                 MODEL_REPO,
                 MODEL_FILENAME,
             )
@@ -104,7 +117,6 @@ class ModelService:
 
             model_path = Path(model_path)
 
-            # Verify the downloaded file.
             if not model_path.is_file():
                 raise FileNotFoundError(
                     f"Model file does not exist: {model_path}"
@@ -113,61 +125,65 @@ class ModelService:
             file_size = model_path.stat().st_size
 
             if file_size == 0:
-                raise ValueError(
-                    "Downloaded model file is empty."
-                )
+                raise ValueError("Downloaded model is empty.")
 
             log.info(
-                "Model downloaded: %s (%s bytes)",
+                "TFLite model downloaded: %s (%s bytes)",
                 model_path,
                 file_size,
             )
 
-            # A complete .keras model must be a valid ZIP archive.
-            if not zipfile.is_zipfile(model_path):
-                raise ValueError(
-                    "The downloaded file is not a valid Keras "
-                    "archive. Check the Hugging Face upload."
-                )
-
-            # Load the complete Keras model.
-            model = keras.models.load_model(
-                str(model_path),
-                compile=False,
-                safe_mode=True,
+            # Load TensorFlow Lite interpreter.
+            interpreter = tf.lite.Interpreter(
+                model_path=str(model_path),
+                num_threads=TFLITE_NUM_THREADS,
             )
 
-            # Validate input.
-            ishape = model.input_shape
+            interpreter.allocate_tensors()
 
-            if isinstance(ishape, list) or len(ishape) != 4:
+            input_details = interpreter.get_input_details()
+            output_details = interpreter.get_output_details()
+
+            if len(input_details) != 1:
                 raise ValueError(
-                    f"Expected one 4D image input, got {ishape}"
+                    f"Expected one model input, got {len(input_details)}"
                 )
 
-            if ishape[1] is None or ishape[2] is None:
+            if len(output_details) != 1:
                 raise ValueError(
-                    f"Dynamic image dimensions unsupported: {ishape}"
+                    f"Expected one model output, got {len(output_details)}"
+                )
+
+            input_detail = input_details[0]
+            output_detail = output_details[0]
+
+            # Validate input shape.
+            ishape = input_detail["shape"]
+
+            if len(ishape) != 4:
+                raise ValueError(
+                    f"Expected 4D image input, got {ishape}"
                 )
 
             if ishape[-1] != 3:
                 raise ValueError(
-                    f"Expected RGB input with 3 channels, got {ishape}"
+                    f"Expected RGB input, got {ishape}"
                 )
 
             input_h = int(ishape[1])
             input_w = int(ishape[2])
 
-            # Validate classifier output.
-            oshape = model.output_shape
-
-            if (
-                isinstance(oshape, list)
-                or len(oshape) != 2
-                or oshape[-1] is None
-            ):
+            if input_h <= 0 or input_w <= 0:
                 raise ValueError(
-                    f"Expected one 2D classifier output, got {oshape}"
+                    f"Invalid input dimensions: {ishape}"
+                )
+
+            # Validate output shape.
+            oshape = output_detail["shape"]
+
+            if len(oshape) != 2:
+                raise ValueError(
+                    f"Expected 2D classifier output, got {oshape}"
                 )
 
             n_out = int(oshape[-1])
@@ -196,7 +212,9 @@ class ModelService:
                 )
 
             info = {
-                "name": getattr(model, "name", None) or "LeukNet",
+                "name": "LeukNet",
+                "format": "TensorFlow Lite",
+                "quantization": "float16 weights",
                 "input_size": [input_h, input_w],
                 "classes": self.settings.class_list,
                 "blast_class": self.settings.class_list[
@@ -206,48 +224,136 @@ class ModelService:
                 "blast_probability_threshold": (
                     self.settings.blast_prob_threshold
                 ),
-                "keras_version": meta.get(
-                    "keras_version", keras.__version__
-                ),
+                "tensorflow_version": tf.__version__,
                 "model_saved": meta.get("date_saved"),
                 "source": f"{MODEL_REPO}/{MODEL_FILENAME}",
                 "file_size_bytes": file_size,
+                "inference_threads": TFLITE_NUM_THREADS,
             }
 
-            # Warm-up inference before marking the model ready.
-            model.predict(
-                np.zeros(
-                    (1, input_h, input_w, 3),
-                    dtype=np.float32,
-                ),
-                verbose=0,
+            # Warm-up inference.
+            dummy = np.zeros(
+                (1, input_h, input_w, 3),
+                dtype=np.float32,
             )
 
+            self._invoke_interpreter(
+                interpreter,
+                input_detail,
+                output_detail,
+                dummy,
+            )
+
+            # Mark model ready only after successful warm-up.
             self.input_h = input_h
             self.input_w = input_w
+
+            self.input_detail = input_detail
+            self.output_detail = output_detail
+
             self.info = info
-            self.model = model
+            self.model = interpreter
             self.error = None
 
             log.info(
-                "LeukNet model loaded successfully: %s",
+                "LeukNet TFLite model loaded successfully: %s",
                 self.info,
             )
 
         except Exception as exc:
+
             self.model = None
+            self.input_detail = None
+            self.output_detail = None
+
             self.error = f"{type(exc).__name__}: {exc}"
-            log.exception("Model failed to load")
+
+            log.exception("TFLite model failed to load")
 
     @property
     def ready(self) -> bool:
         return self.model is not None
 
     # --------------------------------------------------
+    # TensorFlow Lite inference helper
+    # --------------------------------------------------
+
+    @staticmethod
+    def _invoke_interpreter(
+        interpreter,
+        input_detail: dict,
+        output_detail: dict,
+        batch: np.ndarray,
+    ) -> np.ndarray:
+
+        input_index = input_detail["index"]
+        output_index = output_detail["index"]
+
+        input_dtype = input_detail["dtype"]
+
+        input_data = np.asarray(batch, dtype=np.float32)
+
+        # Handle quantized integer input tensors.
+        if np.issubdtype(input_dtype, np.integer):
+
+            scale, zero_point = input_detail["quantization"]
+
+            if scale <= 0:
+                raise ValueError(
+                    "Invalid input quantization parameters."
+                )
+
+            limits = np.iinfo(input_dtype)
+
+            input_data = np.clip(
+                np.round(input_data / scale + zero_point),
+                limits.min,
+                limits.max,
+            ).astype(input_dtype)
+
+        else:
+            input_data = input_data.astype(input_dtype)
+
+        interpreter.set_tensor(
+            input_index,
+            input_data,
+        )
+
+        interpreter.invoke()
+
+        output = interpreter.get_tensor(
+            output_index
+        )
+
+        output = np.asarray(output)
+
+        # Convert quantized output to floating point.
+        output_dtype = output_detail["dtype"]
+
+        if np.issubdtype(output_dtype, np.integer):
+
+            scale, zero_point = output_detail["quantization"]
+
+            if scale <= 0:
+                raise ValueError(
+                    "Invalid output quantization parameters."
+                )
+
+            output = (
+                output.astype(np.float32) - zero_point
+            ) * scale
+
+        else:
+            output = output.astype(np.float32)
+
+        return output
+
+    # --------------------------------------------------
     # Preprocessing
     # --------------------------------------------------
 
     def preprocess(self, batch: np.ndarray) -> np.ndarray:
+
         mode = self.settings.preprocess_mode.lower()
 
         if mode == "resnet":
@@ -264,8 +370,13 @@ class ModelService:
             f"'{self.settings.preprocess_mode}'"
         )
 
+    # --------------------------------------------------
+    # Blast probability prediction
+    # --------------------------------------------------
+
     def predict_blast_probs(
-        self, batch: np.ndarray
+        self,
+        batch: np.ndarray,
     ) -> np.ndarray:
 
         if not self.ready:
@@ -273,16 +384,35 @@ class ModelService:
                 self.error or "Model not loaded"
             )
 
-        x = self.preprocess(batch.astype(np.float32))
+        x = self.preprocess(
+            batch.astype(np.float32)
+        )
+
+        predictions = []
 
         with self._lock:
-            probs = self.model.predict(
-                x,
-                batch_size=32,
-                verbose=0,
-            )
 
-        probs = np.asarray(probs)
+            # Process one tile at a time to reduce RAM usage.
+            for sample in x:
+
+                single = np.expand_dims(
+                    sample,
+                    axis=0,
+                )
+
+                probs = self._invoke_interpreter(
+                    self.model,
+                    self.input_detail,
+                    self.output_detail,
+                    single,
+                )
+
+                predictions.append(probs)
+
+        probs = np.concatenate(
+            predictions,
+            axis=0,
+        )
 
         if (
             probs.ndim != 2
@@ -306,13 +436,16 @@ class ModelService:
     ) -> list[tuple[str, Image.Image | None, str]]:
 
         if content_type == "application/pdf" or raw[:5] == b"%PDF-":
+
             try:
+
                 pdf = pdfium.PdfDocument(raw)
                 out = []
 
                 for i in range(
                     min(len(pdf), self.settings.max_pdf_pages)
                 ):
+
                     page_img = (
                         pdf[i]
                         .render(scale=2)
@@ -329,12 +462,15 @@ class ModelService:
                 ]
 
             except Exception:
+
                 log.exception("PDF processing failed")
+
                 return [
                     (filename, None, "The PDF could not be read.")
                 ]
 
         try:
+
             img = ImageOps.exif_transpose(
                 Image.open(io.BytesIO(raw))
             ).convert("RGB")
@@ -342,6 +478,7 @@ class ModelService:
             return [(filename, img, "")]
 
         except Exception:
+
             return [
                 (filename, None, "File is not a readable image.")
             ]
@@ -360,6 +497,7 @@ class ModelService:
         s = self.settings
 
         if img is None:
+
             return ImageAnalysis(
                 filename,
                 status="unknown",
@@ -367,6 +505,7 @@ class ModelService:
             )
 
         if min(img.size) < _MIN_SIDE:
+
             return ImageAnalysis(
                 filename,
                 status="unknown",
@@ -376,6 +515,7 @@ class ModelService:
         longest = max(img.size)
 
         if longest > s.max_image_side:
+
             scale = s.max_image_side / longest
 
             img = img.resize(
@@ -389,6 +529,7 @@ class ModelService:
         original = self._encode(img, 512, 70)
 
         if _laplacian_variance(img) < s.blur_threshold:
+
             return ImageAnalysis(
                 filename,
                 status="unknown",
@@ -403,6 +544,7 @@ class ModelService:
                 np.asarray(img.convert("HSV"))
             ) < s.min_stain_fraction
         ):
+
             return ImageAnalysis(
                 filename,
                 status="unknown",
@@ -414,6 +556,7 @@ class ModelService:
         tiles, boxes, foreign_boxes = self._make_tiles(img)
 
         if not tiles:
+
             return ImageAnalysis(
                 filename,
                 status="unknown",
@@ -423,19 +566,43 @@ class ModelService:
                 note="No analysable cells found.",
             )
 
-        probs = self.predict_blast_probs(np.stack(tiles))
+        # Predict in small chunks to limit temporary memory.
+        probability_chunks = []
+
+        chunk_size = 8
+
+        for start in range(0, len(tiles), chunk_size):
+
+            chunk = np.stack(
+                tiles[start:start + chunk_size]
+            )
+
+            probability_chunks.append(
+                self.predict_blast_probs(chunk)
+            )
+
+        probs = np.concatenate(
+            probability_chunks
+        )
 
         flagged = probs >= s.blast_prob_threshold
 
         annotated = img.copy()
         draw = ImageDraw.Draw(annotated)
 
-        width = max(2, round(max(img.size) / 400))
+        width = max(
+            2,
+            round(max(img.size) / 400),
+        )
 
         for (x0, y0, x1, y1), p, hit in zip(
-            boxes, probs, flagged
+            boxes,
+            probs,
+            flagged,
         ):
+
             if hit:
+
                 draw.rectangle(
                     [x0, y0, x1 - 1, y1 - 1],
                     outline=(255, 40, 40),
@@ -449,6 +616,7 @@ class ModelService:
                 )
 
         for x0, y0, x1, y1 in foreign_boxes:
+
             draw.rectangle(
                 [x0, y0, x1 - 1, y1 - 1],
                 outline=(255, 170, 0),
@@ -481,7 +649,11 @@ class ModelService:
 
         h, w = self.input_h, self.input_w
 
-        arr = np.asarray(img, dtype=np.float32)
+        arr = np.asarray(
+            img,
+            dtype=np.float32,
+        )
+
         H, W = arr.shape[:2]
 
         if (
@@ -489,22 +661,33 @@ class ModelService:
             or W < w
             or max(H, W) <= int(1.5 * max(h, w))
         ):
+
             tile = np.asarray(
-                img.resize((w, h), Image.BILINEAR),
+                img.resize(
+                    (w, h),
+                    Image.BILINEAR,
+                ),
                 dtype=np.float32,
             )
 
             return [tile], [(0, 0, W, H)], []
 
-        hsv = np.asarray(img.convert("HSV"))
+        hsv = np.asarray(
+            img.convert("HSV")
+        )
 
         stride = max(
             1,
             int(self.settings.tile_stride or w),
         )
 
-        xs = list(range(0, W - w + 1, stride))
-        ys = list(range(0, H - h + 1, stride))
+        xs = list(
+            range(0, W - w + 1, stride)
+        )
+
+        ys = list(
+            range(0, H - h + 1, stride)
+        )
 
         if not xs or xs[-1] + w < W:
             xs.append(max(0, W - w))
@@ -517,6 +700,7 @@ class ModelService:
         foreign = []
 
         for y in ys:
+
             for x in xs:
 
                 t = arr[y:y+h, x:x+w]
@@ -530,12 +714,15 @@ class ModelService:
                         hsv[y:y+h, x:x+w]
                     ) < _MAX_STAIN_TILE
                 ):
+
                     foreign.append(
                         (x, y, x+w, y+h)
                     )
+
                     continue
 
                 tiles.append(t)
+
                 boxes.append(
                     (x, y, x+w, y+h)
                 )
@@ -554,7 +741,10 @@ class ModelService:
     ) -> str:
 
         img = img.copy()
-        img.thumbnail((max_side, max_side))
+
+        img.thumbnail(
+            (max_side, max_side)
+        )
 
         buf = io.BytesIO()
 
@@ -566,11 +756,18 @@ class ModelService:
 
         return (
             "data:image/jpeg;base64,"
-            + base64.b64encode(buf.getvalue()).decode()
+            + base64.b64encode(
+                buf.getvalue()
+            ).decode()
         )
 
 
+# --------------------------------------------------
+# Image quality helpers
+# --------------------------------------------------
+
 def _stain_fraction(hsv: np.ndarray) -> float:
+
     h, s = hsv[..., 0], hsv[..., 1]
 
     stained = (
@@ -582,10 +779,15 @@ def _stain_fraction(hsv: np.ndarray) -> float:
 
 
 def _laplacian_variance(img: Image.Image) -> float:
+
     g = img.convert("L")
+
     g.thumbnail((512, 512))
 
-    a = np.asarray(g, dtype=np.float32)
+    a = np.asarray(
+        g,
+        dtype=np.float32,
+    )
 
     if min(a.shape) < 3:
         return 0.0

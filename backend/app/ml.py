@@ -36,7 +36,7 @@ MODEL_REPO = os.getenv(
 
 MODEL_FILENAME = os.getenv(
     "HF_MODEL_FILENAME",
-    "LeukNet-ResNet50",
+    "model.weights.h5",
 )
 
 _RESNET_BGR_MEAN = np.array(

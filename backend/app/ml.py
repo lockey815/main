@@ -17,6 +17,9 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
+import keras
+import huggingface_hub
+from huggingface_hub import hf_hub_download
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
@@ -83,8 +86,6 @@ class ModelService:
 
     def load(self) -> None:
         try:
-           import json
-import keras
 
 config_path = hf_hub_download(
     repo_id=MODEL_REPO,

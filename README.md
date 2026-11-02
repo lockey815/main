@@ -1,161 +1,364 @@
-# LeukNet - FastAPI + React
 
-AI-assisted blood-smear screening: sign-in, patient register, LeukNet Assistant (drag-and-drop analysis with a
-review-then-save step), Reports Manager with Quick View / print / PDF, QR verification and facility branding.
+# 🩸 LeukNet – Blood Cell Classification System
 
+**AI-powered blood cell image classification platform.**
+
+LeukNet is a web-based application designed to support blood cell image analysis using deep learning. It combines a ResNet50-based classification model with a React frontend and FastAPI backend to provide an integrated image analysis platform.
+
+---
+
+## 🚀 Features
+
+- **AI-powered classification:** Deep learning-based blood cell image classification.
+- **Image analysis:** Upload microscopy images for automated analysis.
+- **PDF processing:** Supports PDF documents containing images, where configured.
+- **User authentication:** Secure registration and login.
+- **Patient management:** Organize patient records.
+- **Analysis history:** Access previous analysis sessions.
+- **Reports:** Generate and manage analysis reports.
+- **Administration:** Manage application settings and users.
+
+---
+
+## 🛠️ Technology Stack
+
+| Component | Technology |
+|---|---|
+| Frontend | React, Vite |
+| Backend | Python, FastAPI |
+| Machine Learning | TensorFlow Lite |
+| Model Architecture | ResNet50 |
+| Database | PostgreSQL |
+| Database Hosting | Supabase |
+| Model Hosting | Hugging Face |
+| Frontend Hosting | Cloudflare Pages |
+| Backend Hosting | Render |
+| Version Control | Git, GitHub |
+
+---
+
+## 🏗️ System Architecture
+
+```text
+                  USER
+                   |
+                   v
+          React + Vite Frontend
+             Cloudflare Pages
+                   |
+                   | REST API
+                   v
+             FastAPI Backend
+                 Render
+                   |
+          +--------+--------+
+          |                 |
+          v                 v
+    TensorFlow Lite     PostgreSQL
+     ResNet50 Model      Supabase
+          |
+          v
+    Image Classification
+          |
+          v
+    Results and Reports
+          |
+          v
+       Frontend
 ```
-leuknet/
-├── backend/                       <- FastAPI (deploys to Hugging Face Spaces)
-│   ├── main.py                    <- app entry point, CORS, auth-protected routers
-│   ├── requirements.txt  Dockerfile  README.md(HF header)  .env.example  .gitattributes
+
+---
+
+## 📂 Project Structure
+
+```text
+main/
+│
+├── backend/
 │   ├── app/
-│   │   ├── config.py database.py models.py schemas.py auth.py qr.py pdf.py
-│   │   ├── ml.py                  <- model from config.json, preprocessing, tiling, blast counting, checks
-│   │   ├── analysis.py            <- totals, acute/chronic rule, summaries (Mistral or template)
-│   │   └── routers/ auth predict sessions patients reports verify settings
-│   ├── model/
-│   │   ├── config.json  metadata.json        (included)
-│   │   └── model.weights.h5                  <- !!! YOU copy your 204 MB file here !!!
-│   ├── scripts/ calibrate.py create_user.py
-│   └── tests/test_e2e.py          <- runs without your weights (random weights)
-└── frontend/                      <- React + Vite (deploys to Vercel)
-    └── src/ services/api.js (Axios) · context/ · components/ · pages/
-            Welcome About Login Dashboard PatientRegister Assistant ReportsManager ReportPage Settings Verify
+│   │   ├── routers/
+│   │   │   ├── auth.py
+│   │   │   ├── patients.py
+│   │   │   ├── predict.py
+│   │   │   ├── reports.py
+│   │   │   ├── sessions.py
+│   │   │   ├── settings.py
+│   │   │   └── verify.py
+│   │   │
+│   │   ├── auth.py
+│   │   ├── config.py
+│   │   ├── database.py
+│   │   └── ml.py
+│   │
+│   ├── main.py
+│   └── requirements.txt
+│
+├── front_end/
+│   ├── public/
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.js
+│
+└── README.md
 ```
 
-## 1. Run locally (Debian 13, VS Code)
+*This is an overview of the main project components.*
+
+---
+
+## ⚙️ Installation and Setup
+
+### 1. Clone the Repository
 
 ```bash
-sudo apt update && sudo apt install -y python3 python3-venv python3-pip git git-lfs curl nodejs npm
-code leuknet
+git clone https://github.com/lockey815/main.git
+cd main
 ```
 
-**Place the weights:** copy `model.weights.h5` into `backend/model/` (next to `config.json` and `metadata.json`).
+### 2. Backend Setup
 
-```bash
-cp ~/Downloads/model.weights.h5 backend/model/ && ls -lh backend/model   # ~204M
-```
+Navigate to the backend directory:
 
-**Backend**
 ```bash
 cd backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip && pip install -r requirements.txt
-cp .env.example .env        # then edit: ADMIN_EMAIL, ADMIN_PASSWORD, SECRET_KEY
+```
+
+Create a virtual environment:
+
+```bash
+python -m venv venv
+```
+
+Activate the environment.
+
+**Windows:**
+
+```bash
+venv\Scripts\activate
+```
+
+**Linux/macOS:**
+
+```bash
+source venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Configure Environment Variables
+
+Create a `.env` file in the backend directory.
+
+Example configuration:
+
+```env
+DATABASE_URL=your_postgresql_connection_string
+SECRET_KEY=your_secure_secret_key
+
+ADMIN_EMAIL=your_admin_email
+ADMIN_PASSWORD=your_admin_password
+
+HF_MODEL_REPO=Lockey815/LeukNet-ResNet50
+HF_MODEL_FILENAME=leuknet_float16.tflite
+HF_MODEL_REVISION=main
+
+TFLITE_NUM_THREADS=1
+```
+
+Use the exact variable names expected by your backend configuration.
+
+**Important:** Never upload your actual database credentials, passwords, or secret keys to GitHub.
+
+### 4. Start the Backend
+
+From the `backend` directory:
+
+```bash
 uvicorn main:app --reload --port 8000
 ```
-Check http://localhost:8000/api/health -> `"model_loaded": true`. API docs: http://localhost:8000/docs.
-The account in `ADMIN_EMAIL` / `ADMIN_PASSWORD` is created on startup. More accounts:
-`python scripts/create_user.py nurse@clinic.org 'a-strong-password'`.
 
-**Frontend**
-```bash
-cd frontend && cp .env.example .env && npm install && npm run dev      # http://localhost:5173
+Backend documentation:
+
+```text
+http://localhost:8000/docs
 ```
 
-**Tests (no weights needed):** `cd backend && pip install pytest && pytest -q`
+Health endpoint:
 
-## 2. Calibrate two things config.json cannot tell us
+```text
+http://localhost:8000/api/health
+```
 
-`config.json` has no rescaling layer and no class names, so (a) the pixel scaling used in training and (b) which
-output neuron means "blast" must be set by you. Put ~20+ images you are sure about in `calib/blast/` and
-`calib/non_blast/`, then:
+### 5. Frontend Setup
+
+Open another terminal and navigate to the frontend:
 
 ```bash
-cd backend && source .venv/bin/activate
-python scripts/calibrate.py ../calib --blast-folder blast
+cd front_end
 ```
-It prints the best `PREPROCESS_MODE` and `BLAST_CLASS_INDEX`; copy both lines into `backend/.env` and restart.
-Wrong values give confident but wrong results, so do not skip this.
 
-## 3. How the Chapter 4.3 workflow is implemented
+Install dependencies:
 
-1. **Welcome page** (Get Started / About) -> **sign in** with email + password.
-2. **Dashboard** with four module cards.
-3. **Patient Register**: Add Patient form (Save Details), table with entries-per-page, search, sort, Edit/Delete.
-4. **LeukNet Assistant**: tab *File uploader* (choose patient, drag & drop up to 8 JPEG/PNG/PDF files, previews,
-   Process) -> tab *LeukNet Tools* (`Processed k / N samples...`, one card per sample with Original vs Analysed
-   image and a "n Blast Cells" badge) -> **Results** table (Uploaded Sample Size, Total Blast Cells, Foreign
-   Objects) + **Results Report** text -> **New Session** / **Save Results**.
-5. **Save Results** creates the report (UUID + QR token). Nothing is saved before the pathologist reviews it,
-   and the report is built from server-held results, so a client cannot forge findings.
-6. **Reports Manager**: table, **Quick View**, **PDF** (server-generated), **Print / Preview**, Delete, CSV export.
-7. **QR verification** `/verify/<token>`: public "Report is Valid" page with the report's details.
-8. **Settings**: facility name, address, contacts, logo, report footer; applied to every report.
-
-Details that need your attention:
-
-- **Blast count = suspected blast regions.** The retrained model classifies whole images, so each smear is cut
-  into model-sized tiles (read from config.json), empty background is skipped, and tiles with blast probability
-  >= `BLAST_PROB_THRESHOLD` are counted and boxed in red. It is not an exact per-cell count (that needs a detector).
-- **Foreign objects is a heuristic**, not a model output: tiles with texture but almost no Wright/Giemsa stain
-  colours (dust, fibres, debris) are counted, boxed in amber and excluded from blast classification. Validate it on
-  your images; turn it off with `FOREIGN_OBJECT_CHECK=false`.
-- **Unknown** is returned for blurred images (`BLUR_THRESHOLD`) and images with almost no stained cells
-  (`MIN_STAIN_FRACTION`) such as unrelated photos or greyscale images. Tune on your images.
-- **Acute / chronic rule**: the report states that more than 15 blasts = acute lymphoblastic leukemia and fewer =
-  chronic. It is implemented as `ACUTE_BLAST_THRESHOLD=15` (0 turns it off). It is applied to tile counts, not
-  cell counts, and is not a validated clinical criterion - treat that wording with caution.
-- **Mistral summaries** are used when `MISTRAL_API_KEY` is set (Mistral's free tier may be enough; check its
-  current limits). Only counts are sent - never names, contacts or images. Output containing numbers that are not
-  in the facts is rejected, and any failure falls back to a built-in template. Not tested against the live API.
-- **PDF input**: each PDF page (up to `MAX_PDF_PAGES`) becomes one sample.
-- **Verification page** shows patient name, age, gender and result (as in the report). Set
-  `VERIFY_SHOW_FULL_DETAILS=false` to show initials only.
-
-## 4. API summary
-
-Public: `POST /api/auth/login`, `GET /api/verify/{token}`, `GET /api/health`. Everything else needs `Authorization: Bearer <token>`.
-
-| Method | Path | Notes |
-|---|---|---|
-| POST | `/api/predict` | multipart `files` (+ optional `session_id` to add to a session); returns findings + running totals |
-| POST | `/api/sessions/{id}/summarize` | final totals + Results Report text (Mistral or template) |
-| DELETE | `/api/sessions/{id}` | New Session |
-| GET/POST | `/api/patients` · GET/PUT/DELETE `/api/patients/{id}` | CRUD; delete cascades to reports |
-| POST | `/api/reports` | Save Results: `{patient_id, session_id}` -> report with UUID + QR |
-| GET | `/api/reports`, `/api/reports/{id}`, `/{id}/pdf`, `/{id}/qr.png` | |
-| DELETE | `/api/reports/{id}` | |
-| GET/PUT | `/api/settings` | facility branding |
-
-## 5. Free deployment: Hugging Face Spaces (backend) + Vercel (frontend)
-
-### Backend -> Hugging Face Space (Docker)
-1. huggingface.co -> **New Space** -> SDK **Docker** -> blank -> CPU basic (free).
-2. Push the contents of `backend/` as the Space root (Git LFS is needed for the 204 MB weights):
 ```bash
-git lfs install
-git clone https://huggingface.co/spaces/YOUR_HF_USERNAME/leuknet-api && cd leuknet-api
-cp -r ../leuknet/backend/. .
-git add -A && git commit -m "LeukNet API" && git push      # .gitattributes already tracks *.h5 with LFS
+npm install
 ```
-3. Space -> **Settings -> Variables and secrets**:
 
-| Name | Type | Value |
-|---|---|---|
-| `SECRET_KEY` | Secret | long random string (`python -c "import secrets; print(secrets.token_urlsafe(48))"`) |
-| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Secret | your first account |
-| `DATABASE_URL` | Secret | Postgres URL (see below) |
-| `MISTRAL_API_KEY` | Secret | optional |
-| `CORS_ORIGINS`, `FRONTEND_URL` | Variable | `https://YOUR-APP.vercel.app` |
-| `PREPROCESS_MODE`, `BLAST_CLASS_INDEX` | Variable | from calibration |
+Create a `.env` file:
 
-API URL: `https://YOUR_HF_USERNAME-leuknet-api.hf.space`.
+```env
+VITE_API_URL=http://localhost:8000
+```
 
-**Persistence:** a free Space's disk is wiped on rebuild/restart, so SQLite data would be lost. Create a free hosted
-Postgres (e.g. Neon or Supabase - check current free limits) and put its URL in `DATABASE_URL`
-(`postgresql://user:pass@host/db?sslmode=require`). Tables are created on startup. Free Spaces sleep when idle, so
-the first request after a pause is slow.
+Start the frontend:
 
-### Frontend -> Vercel
-1. Push `frontend/` to GitHub, import it in Vercel (Vite is auto-detected).
-2. Environment variable `VITE_API_URL` = your Space URL.
-3. After deploying, put the Vercel URL into the Space's `CORS_ORIGINS` and `FRONTEND_URL` and restart the Space
-   (QR codes embed `FRONTEND_URL`). `vercel.json` rewrites all routes so `/verify/<token>` works.
+```bash
+npm run dev
+```
 
-## 6. Before real patient data
+The frontend will normally run at:
 
-Accounts and bearer-token auth are included, but this is still a student-built system: use a strong `SECRET_KEY`,
-HTTPS only, a managed database with backups, and get a data-protection review (e.g. Uganda's Data Protection and
-Privacy Act, 2019). There is no password-reset or user-management screen (use `scripts/create_user.py`). Model
-output is a screening aid and must be reviewed by a qualified pathologist or hematologist.
+```text
+http://localhost:5173
+```
+
+Build for production:
+
+```bash
+npm run build
+```
+
+---
+
+## 🧠 Machine Learning Model
+
+LeukNet uses a ResNet50-based deep learning model for blood cell image classification.
+
+The model is hosted on Hugging Face.
+
+**Model Repository:**
+
+[Lockey815/LeukNet-ResNet50](https://huggingface.co/Lockey815/LeukNet-ResNet50)
+
+The deployed model uses TensorFlow Lite to reduce model storage requirements and support more efficient deployment.
+
+### Model Configuration
+
+| Variable | Description |
+|---|---|
+| `HF_MODEL_REPO` | Hugging Face model repository |
+| `HF_MODEL_FILENAME` | Model filename |
+| `HF_MODEL_REVISION` | Model repository revision |
+| `TFLITE_NUM_THREADS` | Inference thread count |
+
+---
+
+## 🌐 Deployment
+
+LeukNet uses the following services:
+
+| Platform | Purpose |
+|---|---|
+| [Cloudflare Pages](https://pages.cloudflare.com/) | Frontend hosting |
+| [Render](https://render.com/) | Backend hosting |
+| [Supabase](https://supabase.com/) | PostgreSQL database |
+| [Hugging Face](https://huggingface.co/) | Model hosting |
+
+### Backend Deployment – Render
+
+Configure the Render service:
+
+**Root Directory**
+
+```text
+backend
+```
+
+**Build Command**
+
+```bash
+pip install -r requirements.txt
+```
+
+**Start Command**
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port $PORT
+```
+
+Configure all required environment variables in the Render dashboard.
+
+### Frontend Deployment – Cloudflare Pages
+
+**Build Command**
+
+```bash
+npm run build
+```
+
+**Build Output Directory**
+
+```text
+dist
+```
+
+Set the production environment variable:
+
+```env
+VITE_API_URL=https://your-backend-url.onrender.com
+```
+
+Replace the example URL with your actual backend URL.
+
+Ensure that the backend CORS configuration allows your deployed frontend domain.
+
+---
+
+## 🔍 API Documentation
+
+FastAPI provides interactive API documentation.
+
+| Endpoint | Purpose |
+|---|---|
+| `/` | API information |
+| `/docs` | Swagger API documentation |
+| `/openapi.json` | OpenAPI specification |
+| `/api/health` | Backend and model health status |
+
+The health endpoint reports whether the machine learning model has initialized successfully.
+
+---
+
+## 🔐 Security
+
+- Store sensitive credentials in environment variables.
+- Never commit `.env` files.
+- Use strong production secret keys.
+- Restrict CORS to trusted frontend domains.
+- Use HTTPS for production communication.
+- Protect authenticated endpoints and sensitive records.
+
+---
+
+## ⚠️ Disclaimer
+
+LeukNet is a software and machine learning project intended to support blood cell image analysis and research.
+
+Its predictions should not be considered a standalone medical diagnosis or a replacement for professional laboratory evaluation and clinical judgment.
+
+Appropriate validation is required before any clinical application.
+
+---
+
+## 👨‍💻 Developer
+
+**LeukNet Development Team**
+
+GitHub: [@lockey815](https://github.com/lockey815)
+
+---
+
+**Built with React, FastAPI, TensorFlow Lite and PostgreSQL.**

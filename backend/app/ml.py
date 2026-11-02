@@ -1,3 +1,4 @@
+
 """LeukNet model loading and tile-based inference."""
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import io
 import json
 import logging
 import threading
+import zipfile
+from pathlib import Path
 from dataclasses import dataclass, field
 
 import keras
@@ -32,6 +35,10 @@ MODEL_FILENAME = os.getenv(
 )
 MODEL_REVISION = os.getenv("HF_MODEL_REVISION", "main")
 HF_TOKEN = os.getenv("HF_TOKEN") or None
+
+# Download to a local directory instead of relying on the
+# Hugging Face cache snapshot path.
+MODEL_DOWNLOAD_DIR = Path("/tmp/leuknet-model")
 
 _RESNET_BGR_MEAN = np.array(
     [103.939, 116.779, 123.68], dtype=np.float32
@@ -69,6 +76,10 @@ class ModelService:
     error: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # --------------------------------------------------
+    # Model loading
+    # --------------------------------------------------
+
     def load(self) -> None:
         try:
             log.info(
@@ -77,16 +88,51 @@ class ModelService:
                 MODEL_FILENAME,
             )
 
+            MODEL_DOWNLOAD_DIR.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
             model_path = hf_hub_download(
                 repo_id=MODEL_REPO,
                 filename=MODEL_FILENAME,
                 revision=MODEL_REVISION,
                 token=HF_TOKEN,
+                local_dir=str(MODEL_DOWNLOAD_DIR),
+                force_download=True,
             )
 
-            # Requires a complete Keras model, not weights-only H5.
-            model = keras.models.load_model(
+            model_path = Path(model_path)
+
+            # Verify the downloaded file.
+            if not model_path.is_file():
+                raise FileNotFoundError(
+                    f"Model file does not exist: {model_path}"
+                )
+
+            file_size = model_path.stat().st_size
+
+            if file_size == 0:
+                raise ValueError(
+                    "Downloaded model file is empty."
+                )
+
+            log.info(
+                "Model downloaded: %s (%s bytes)",
                 model_path,
+                file_size,
+            )
+
+            # A complete .keras model must be a valid ZIP archive.
+            if not zipfile.is_zipfile(model_path):
+                raise ValueError(
+                    "The downloaded file is not a valid Keras "
+                    "archive. Check the Hugging Face upload."
+                )
+
+            # Load the complete Keras model.
+            model = keras.models.load_model(
+                str(model_path),
                 compile=False,
                 safe_mode=True,
             )
@@ -109,8 +155,8 @@ class ModelService:
                     f"Expected RGB input with 3 channels, got {ishape}"
                 )
 
-            self.input_h = int(ishape[1])
-            self.input_w = int(ishape[2])
+            input_h = int(ishape[1])
+            input_w = int(ishape[2])
 
             # Validate classifier output.
             oshape = model.output_shape
@@ -133,7 +179,9 @@ class ModelService:
                 )
 
             if not 0 <= self.settings.blast_class_index < n_out:
-                raise ValueError("BLAST_CLASS_INDEX is out of range.")
+                raise ValueError(
+                    "BLAST_CLASS_INDEX is out of range."
+                )
 
             # Optional metadata.
             meta_path = self.settings.resolve(
@@ -147,12 +195,9 @@ class ModelService:
                     meta_path.read_text(encoding="utf-8")
                 )
 
-            self.info = {
+            info = {
                 "name": getattr(model, "name", None) or "LeukNet",
-                "input_size": [
-                    self.input_h,
-                    self.input_w,
-                ],
+                "input_size": [input_h, input_w],
                 "classes": self.settings.class_list,
                 "blast_class": self.settings.class_list[
                     self.settings.blast_class_index
@@ -166,19 +211,23 @@ class ModelService:
                 ),
                 "model_saved": meta.get("date_saved"),
                 "source": f"{MODEL_REPO}/{MODEL_FILENAME}",
+                "file_size_bytes": file_size,
             }
 
-            self.model = model
-            self.error = None
-
-            # Warm-up inference.
-            self.model.predict(
+            # Warm-up inference before marking the model ready.
+            model.predict(
                 np.zeros(
-                    (1, self.input_h, self.input_w, 3),
+                    (1, input_h, input_w, 3),
                     dtype=np.float32,
                 ),
                 verbose=0,
             )
+
+            self.input_h = input_h
+            self.input_w = input_w
+            self.info = info
+            self.model = model
+            self.error = None
 
             log.info(
                 "LeukNet model loaded successfully: %s",

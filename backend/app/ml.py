@@ -1,52 +1,41 @@
-
-"""Model loading + inference.
-
-The complete Keras model is downloaded from Hugging Face:
-Lockey815/LeukNet-ResNet50/resnet50_final.keras
-
-The model is a whole-image classifier (2-class softmax), not an
-object detector. Blast counting is performed tile-by-tile.
-"""
+"""LeukNet model loading and tile-based inference."""
 
 from __future__ import annotations
+
+import os
+
+os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 import base64
 import io
 import json
 import logging
-import os
 import threading
 from dataclasses import dataclass, field
-import keras
-import huggingface_hub
-from huggingface_hub import hf_hub_download
 
+import keras
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
 import pypdfium2 as pdfium
+from huggingface_hub import hf_hub_download
+from PIL import Image, ImageDraw, ImageOps
 
 from .config import Settings
-
-os.environ.setdefault("KERAS_BACKEND", "tensorflow")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 log = logging.getLogger("leuknet.ml")
 
 MODEL_REPO = os.getenv(
-    "HF_MODEL_REPO",
-    "Lockey815/LeukNet-ResNet50",
+    "HF_MODEL_REPO", "Lockey815/LeukNet-ResNet50"
 )
-
 MODEL_FILENAME = os.getenv(
-    "HF_MODEL_FILENAME",
-    "model.weights.h5",
+    "HF_MODEL_FILENAME", "resnet50_final.keras"
 )
+MODEL_REVISION = os.getenv("HF_MODEL_REVISION", "main")
+HF_TOKEN = os.getenv("HF_TOKEN") or None
 
 _RESNET_BGR_MEAN = np.array(
-    [103.939, 116.779, 123.68],
-    dtype=np.float32,
+    [103.939, 116.779, 123.68], dtype=np.float32
 )
-
 _BACKGROUND_STD = 10.0
 _MIN_SIDE = 32
 _MAX_STAIN_TILE = 0.01
@@ -80,80 +69,73 @@ class ModelService:
     error: str | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    # ---------------------------------------------------------------
-    # Model loading from Hugging Face
-    # ---------------------------------------------------------------
-
     def load(self) -> None:
         try:
+            log.info(
+                "Downloading model: %s/%s",
+                MODEL_REPO,
+                MODEL_FILENAME,
+            )
 
-config_path = hf_hub_download(
-    repo_id=MODEL_REPO,
-    filename="config.json"
-)
+            model_path = hf_hub_download(
+                repo_id=MODEL_REPO,
+                filename=MODEL_FILENAME,
+                revision=MODEL_REVISION,
+                token=HF_TOKEN,
+            )
 
-weights_path = hf_hub_download(
-    repo_id=MODEL_REPO,
-    filename="model.weights.h5"
-)
+            # Requires a complete Keras model, not weights-only H5.
+            model = keras.models.load_model(
+                model_path,
+                compile=False,
+                safe_mode=True,
+            )
 
-with open(config_path, "r") as f:
-    model_config = json.load(f)
-
-model = keras.models.model_from_json(
-    json.dumps(model_config)
-)
-
-model.load_weights(weights_path)
-            # Validate model input dimensions
+            # Validate input.
             ishape = model.input_shape
 
-            if isinstance(ishape, list):
+            if isinstance(ishape, list) or len(ishape) != 4:
                 raise ValueError(
-                    "Multiple-input models are not supported."
-                )
-
-            if len(ishape) != 4:
-                raise ValueError(
-                    f"Expected a 4D image input, got {ishape}"
+                    f"Expected one 4D image input, got {ishape}"
                 )
 
             if ishape[1] is None or ishape[2] is None:
                 raise ValueError(
-                    f"Dynamic image dimensions are not supported: {ishape}"
+                    f"Dynamic image dimensions unsupported: {ishape}"
                 )
 
             if ishape[-1] != 3:
                 raise ValueError(
-                    f"Expected 3-channel RGB input, got {ishape}"
+                    f"Expected RGB input with 3 channels, got {ishape}"
                 )
 
             self.input_h = int(ishape[1])
             self.input_w = int(ishape[2])
 
-            # Validate output classes
+            # Validate classifier output.
             oshape = model.output_shape
 
-            if isinstance(oshape, list):
+            if (
+                isinstance(oshape, list)
+                or len(oshape) != 2
+                or oshape[-1] is None
+            ):
                 raise ValueError(
-                    "Multiple-output models are not supported."
+                    f"Expected one 2D classifier output, got {oshape}"
                 )
 
             n_out = int(oshape[-1])
 
             if n_out != len(self.settings.class_list):
                 raise ValueError(
-                    f"Model has {n_out} outputs but "
-                    f"CLASS_NAMES lists "
-                    f"{len(self.settings.class_list)}."
+                    f"Model has {n_out} outputs but CLASS_NAMES has "
+                    f"{len(self.settings.class_list)} classes."
                 )
 
             if not 0 <= self.settings.blast_class_index < n_out:
-                raise ValueError(
-                    "BLAST_CLASS_INDEX is out of range."
-                )
+                raise ValueError("BLAST_CLASS_INDEX is out of range.")
 
-            # Load optional local metadata
+            # Optional metadata.
             meta_path = self.settings.resolve(
                 self.settings.model_metadata_path
             )
@@ -166,7 +148,7 @@ model.load_weights(weights_path)
                 )
 
             self.info = {
-                "name": model.name or "LeukNet",
+                "name": getattr(model, "name", None) or "LeukNet",
                 "input_size": [
                     self.input_h,
                     self.input_w,
@@ -179,7 +161,9 @@ model.load_weights(weights_path)
                 "blast_probability_threshold": (
                     self.settings.blast_prob_threshold
                 ),
-                "keras_version": meta.get("keras_version"),
+                "keras_version": meta.get(
+                    "keras_version", keras.__version__
+                ),
                 "model_saved": meta.get("date_saved"),
                 "source": f"{MODEL_REPO}/{MODEL_FILENAME}",
             }
@@ -187,7 +171,7 @@ model.load_weights(weights_path)
             self.model = model
             self.error = None
 
-            # Warm-up inference
+            # Warm-up inference.
             self.model.predict(
                 np.zeros(
                     (1, self.input_h, self.input_w, 3),
@@ -210,13 +194,11 @@ model.load_weights(weights_path)
     def ready(self) -> bool:
         return self.model is not None
 
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
     # Preprocessing
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
 
     def preprocess(self, batch: np.ndarray) -> np.ndarray:
-        """Input: float32 RGB array, 0-255, shape (N,H,W,3)."""
-
         mode = self.settings.preprocess_mode.lower()
 
         if mode == "resnet":
@@ -229,18 +211,20 @@ model.load_weights(weights_path)
             return batch
 
         raise ValueError(
-            f"Unknown PREPROCESS_MODE '{self.settings.preprocess_mode}'"
+            f"Unknown PREPROCESS_MODE "
+            f"'{self.settings.preprocess_mode}'"
         )
 
-    def predict_blast_probs(self, batch: np.ndarray) -> np.ndarray:
+    def predict_blast_probs(
+        self, batch: np.ndarray
+    ) -> np.ndarray:
+
         if not self.ready:
             raise ModelNotReady(
                 self.error or "Model not loaded"
             )
 
-        x = self.preprocess(
-            batch.astype(np.float32)
-        )
+        x = self.preprocess(batch.astype(np.float32))
 
         with self._lock:
             probs = self.model.predict(
@@ -249,11 +233,21 @@ model.load_weights(weights_path)
                 verbose=0,
             )
 
-        return np.asarray(probs)[:, self.settings.blast_class_index]
+        probs = np.asarray(probs)
 
-    # ---------------------------------------------------------------
-    # Image upload processing
-    # ---------------------------------------------------------------
+        if (
+            probs.ndim != 2
+            or probs.shape[1] != len(self.settings.class_list)
+        ):
+            raise ValueError(
+                f"Unexpected model prediction shape: {probs.shape}"
+            )
+
+        return probs[:, self.settings.blast_class_index]
+
+    # --------------------------------------------------
+    # Upload processing
+    # --------------------------------------------------
 
     def expand_upload(
         self,
@@ -270,7 +264,7 @@ model.load_weights(weights_path)
                 for i in range(
                     min(len(pdf), self.settings.max_pdf_pages)
                 ):
-                    pil = (
+                    page_img = (
                         pdf[i]
                         .render(scale=2)
                         .to_pil()
@@ -278,7 +272,7 @@ model.load_weights(weights_path)
                     )
 
                     out.append(
-                        (f"{filename} (page {i + 1})", pil, "")
+                        (f"{filename} (page {i + 1})", page_img, "")
                     )
 
                 return out or [
@@ -303,9 +297,9 @@ model.load_weights(weights_path)
                 (filename, None, "File is not a readable image.")
             ]
 
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
     # Image analysis
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
 
     def analyze_image(
         self,
@@ -351,7 +345,7 @@ model.load_weights(weights_path)
                 status="unknown",
                 original_image=original,
                 annotated_image=original,
-                note="The image is too blurred to analyse. Upload a sharper image.",
+                note="The image is too blurred to analyse.",
             )
 
         if (
@@ -365,7 +359,7 @@ model.load_weights(weights_path)
                 status="unknown",
                 original_image=original,
                 annotated_image=original,
-                note="This does not look like a stained blood smear (no stained cells found).",
+                note="No stained cells found.",
             )
 
         tiles, boxes, foreign_boxes = self._make_tiles(img)
@@ -377,28 +371,20 @@ model.load_weights(weights_path)
                 original_image=original,
                 annotated_image=self._encode(img),
                 foreign_objects=len(foreign_boxes),
-                note="No analysable cells found: the image looks empty or contains only non-cellular material.",
+                note="No analysable cells found.",
             )
 
-        probs = self.predict_blast_probs(
-            np.stack(tiles)
-        )
+        probs = self.predict_blast_probs(np.stack(tiles))
 
         flagged = probs >= s.blast_prob_threshold
-        blast_count = int(flagged.sum())
 
         annotated = img.copy()
         draw = ImageDraw.Draw(annotated)
 
-        width = max(
-            2,
-            round(max(img.size) / 400),
-        )
+        width = max(2, round(max(img.size) / 400))
 
         for (x0, y0, x1, y1), p, hit in zip(
-            boxes,
-            probs,
-            flagged,
+            boxes, probs, flagged
         ):
             if hit:
                 draw.rectangle(
@@ -422,7 +408,7 @@ model.load_weights(weights_path)
 
         return ImageAnalysis(
             filename=filename,
-            blast_count=blast_count,
+            blast_count=int(flagged.sum()),
             tiles_analyzed=len(tiles),
             max_blast_probability=round(
                 float(probs.max()), 4
@@ -432,33 +418,30 @@ model.load_weights(weights_path)
             ),
             foreign_objects=len(foreign_boxes),
             status=(
-                "blast_detected" if blast_count else "normal"
+                "blast_detected" if flagged.any() else "normal"
             ),
             original_image=original,
             annotated_image=self._encode(annotated),
         )
 
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
     # Tile generation
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
 
     def _make_tiles(self, img: Image.Image):
 
         h, w = self.input_h, self.input_w
 
-        arr = np.asarray(
-            img,
-            dtype=np.float32,
-        )
-
+        arr = np.asarray(img, dtype=np.float32)
         H, W = arr.shape[:2]
 
-        if max(H, W) <= int(1.5 * max(h, w)):
+        if (
+            H < h
+            or W < w
+            or max(H, W) <= int(1.5 * max(h, w))
+        ):
             tile = np.asarray(
-                img.resize(
-                    (w, h),
-                    Image.BILINEAR,
-                ),
+                img.resize((w, h), Image.BILINEAR),
                 dtype=np.float32,
             )
 
@@ -466,16 +449,19 @@ model.load_weights(weights_path)
 
         hsv = np.asarray(img.convert("HSV"))
 
-        stride = self.settings.tile_stride or w
+        stride = max(
+            1,
+            int(self.settings.tile_stride or w),
+        )
 
         xs = list(range(0, W - w + 1, stride))
         ys = list(range(0, H - h + 1, stride))
 
-        if xs[-1] + w < W:
-            xs.append(W - w)
+        if not xs or xs[-1] + w < W:
+            xs.append(max(0, W - w))
 
-        if ys[-1] + h < H:
-            ys.append(H - h)
+        if not ys or ys[-1] + h < H:
+            ys.append(max(0, H - h))
 
         tiles = []
         boxes = []
@@ -484,7 +470,7 @@ model.load_weights(weights_path)
         for y in ys:
             for x in xs:
 
-                t = arr[y:y + h, x:x + w]
+                t = arr[y:y+h, x:x+w]
 
                 if t.mean(axis=2).std() < _BACKGROUND_STD:
                     continue
@@ -492,24 +478,24 @@ model.load_weights(weights_path)
                 if (
                     self.settings.foreign_object_check
                     and _stain_fraction(
-                        hsv[y:y + h, x:x + w]
+                        hsv[y:y+h, x:x+w]
                     ) < _MAX_STAIN_TILE
                 ):
                     foreign.append(
-                        (x, y, x + w, y + h)
+                        (x, y, x+w, y+h)
                     )
                     continue
 
                 tiles.append(t)
                 boxes.append(
-                    (x, y, x + w, y + h)
+                    (x, y, x+w, y+h)
                 )
 
         return tiles, boxes, foreign
 
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
     # Image encoding
-    # ---------------------------------------------------------------
+    # --------------------------------------------------
 
     @staticmethod
     def _encode(
@@ -535,13 +521,7 @@ model.load_weights(weights_path)
         )
 
 
-# ---------------------------------------------------------------
-# Image quality and stain helpers
-# ---------------------------------------------------------------
-
 def _stain_fraction(hsv: np.ndarray) -> float:
-    """Estimate stained pixels in a Wright/Giemsa blood smear."""
-
     h, s = hsv[..., 0], hsv[..., 1]
 
     stained = (
@@ -553,15 +533,13 @@ def _stain_fraction(hsv: np.ndarray) -> float:
 
 
 def _laplacian_variance(img: Image.Image) -> float:
-    """Estimate image sharpness using Laplacian variance."""
-
     g = img.convert("L")
     g.thumbnail((512, 512))
 
-    a = np.asarray(
-        g,
-        dtype=np.float32,
-    )
+    a = np.asarray(g, dtype=np.float32)
+
+    if min(a.shape) < 3:
+        return 0.0
 
     lap = (
         4 * a[1:-1, 1:-1]

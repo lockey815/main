@@ -80,9 +80,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://main-6x0.pages.dev",
-        "http://localhost:5173",
     ],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

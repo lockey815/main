@@ -103,9 +103,14 @@ class ModelService:
             log.info("Model downloaded to: %s", model_path)
 
             # Load the complete Keras model
-            model = keras.models.load_model(
-                model_path,
-                compile=False,
+            model = keras.applications.ResNet50(
+    include_top=True,
+    weights=None,
+    input_shape=(224, 224, 3),
+    classes=2
+)
+
+model.load_weights(model_path)
             )
 
             # Validate model input dimensions
